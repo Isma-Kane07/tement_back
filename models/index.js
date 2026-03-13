@@ -8,7 +8,16 @@ require('dotenv').config();
 const basename = path.basename(__filename);
 const db = {};
 
-// Config Sequelize
+// Vérification des variables (pour debug)
+console.log('📦 Connexion DB avec:', {
+  DB_NAME: process.env.DB_NAME,
+  DB_USER: process.env.DB_USER,
+  DB_HOST: process.env.DB_HOST,
+  DB_PORT: process.env.DB_PORT,
+  // Ne loggez pas le mot de passe !
+});
+
+// Config Sequelize - ADAPTÉ POUR RAILWAY
 const sequelize = new Sequelize(
   process.env.DB_NAME,
   process.env.DB_USER,
@@ -17,7 +26,13 @@ const sequelize = new Sequelize(
     host: process.env.DB_HOST,
     dialect: 'postgres',
     port: process.env.DB_PORT || 5432,
-    logging: false,
+    logging: console.log, // Mettez true pour voir les requêtes SQL
+    dialectOptions: {
+      ssl: {
+        require: true,
+        rejectUnauthorized: false // CRUCIAL pour Railway
+      }
+    }
   }
 );
 
