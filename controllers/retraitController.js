@@ -1,11 +1,12 @@
 // controllers/retraitController.js
 const { Utilisateur, Transaction } = require('../models');
+const notificationService = require('../services/notificationService');
 
-// 1️⃣ PROPRIÉTAIRE demande un retrait de son wallet
+// 1️⃣ PROPRIÉTAIRE demande un retrait
 exports.demanderRetrait = async (req, res) => {
   try {
     const user_id = req.user.id;
-    const { montant, methode_retrait } = req.body; // methode: 'orange_money', 'bank_transfer', etc.
+    const { montant, methode_retrait } = req.body;
 
     if (!montant || montant <= 0) {
       return res.status(400).json({ message: "Montant invalide" });
@@ -21,7 +22,6 @@ exports.demanderRetrait = async (req, res) => {
       return res.status(404).json({ message: "Utilisateur non trouvé" });
     }
 
-    // Vérifier solde suffisant
     if (user.wallet_balance < montant) {
       return res.status(400).json({ 
         message: "Solde insuffisant",
@@ -30,15 +30,13 @@ exports.demanderRetrait = async (req, res) => {
       });
     }
 
-    // Montant minimum (optionnel)
-    const MONTANT_MINIMUM = 5000; // 5000 FCFA minimum
+    const MONTANT_MINIMUM = 5000;
     if (montant < MONTANT_MINIMUM) {
       return res.status(400).json({ 
         message: `Le montant minimum de retrait est de ${MONTANT_MINIMUM} FCFA` 
       });
     }
 
-    // Créer la demande de retrait
     const transaction = await Transaction.create({
       user_id,
       type: 'retrait',
@@ -46,6 +44,21 @@ exports.demanderRetrait = async (req, res) => {
       statut: 'en_attente',
       description: `Demande de retrait de ${montant} FCFA via ${methode_retrait || 'Mobile Money'}`
     });
+
+    // 🔔 NOTIFICATION: Demande de retrait à l'admin
+    await notificationService.sendToUser(
+      1, // ID de l'admin
+      {
+        title: '💸 Demande de retrait',
+        body: `${user.nom} demande un retrait de ${montant} FCFA`,
+      },
+      {
+        type: 'retrait_demande',
+        transactionId: transaction.id.toString(),
+        montant: montant.toString(),
+        proprietaire: user.nom,
+      }
+    );
 
     res.status(201).json({ 
       message: "✅ Demande de retrait envoyée, en attente de validation admin",
@@ -55,7 +68,7 @@ exports.demanderRetrait = async (req, res) => {
         date_demande: transaction.createdAt,
         statut: transaction.statut
       },
-      solde_actuel: user.wallet_balance // Inchangé pour l'instant
+      solde_actuel: user.wallet_balance
     });
 
   } catch (err) {
@@ -64,7 +77,7 @@ exports.demanderRetrait = async (req, res) => {
   }
 };
 
-// 2️⃣ ADMIN valide le retrait (vous virez l'argent au proprio)
+// 2️⃣ ADMIN valide le retrait
 exports.validerRetrait = async (req, res) => {
   try {
     const { transaction_id, reference_virement } = req.body;
@@ -83,7 +96,6 @@ exports.validerRetrait = async (req, res) => {
 
     const proprietaire = transaction.Utilisateur;
 
-    // Vérifier que le solde est toujours suffisant
     if (proprietaire.wallet_balance < transaction.montant) {
       transaction.statut = 'refuse';
       await transaction.save();
@@ -94,14 +106,27 @@ exports.validerRetrait = async (req, res) => {
       });
     }
 
-    // 💸 DÉBITER LE WALLET DU PROPRIÉTAIRE
     proprietaire.wallet_balance -= transaction.montant;
     await proprietaire.save();
 
-    // ✅ MARQUER LA TRANSACTION COMME VALIDÉE
     transaction.statut = 'valide';
     transaction.description += ` | Validé le ${new Date().toLocaleDateString()} | Ref: ${reference_virement || 'N/A'}`;
     await transaction.save();
+
+    // 🔔 NOTIFICATION: Retrait validé au propriétaire
+    await notificationService.sendToUser(
+      proprietaire.id,
+      {
+        title: '✅ Retrait validé',
+        body: `Votre retrait de ${transaction.montant} FCFA a été traité avec succès`,
+      },
+      {
+        type: 'retrait_valide',
+        transactionId: transaction.id.toString(),
+        montant: transaction.montant.toString(),
+        reference: reference_virement || 'N/A',
+      }
+    );
 
     res.json({ 
       message: "✅ Retrait validé avec succès",
@@ -119,7 +144,7 @@ exports.validerRetrait = async (req, res) => {
   }
 };
 
-// 3️⃣ ADMIN refuse le retrait (si problème)
+// 3️⃣ ADMIN refuse le retrait
 exports.refuserRetrait = async (req, res) => {
   try {
     const { transaction_id, raison } = req.body;
@@ -140,6 +165,26 @@ exports.refuserRetrait = async (req, res) => {
       : `Demande de retrait refusée`;
     await transaction.save();
 
+    const proprietaire = await Utilisateur.findByPk(transaction.user_id);
+
+    // 🔔 NOTIFICATION: Retrait refusé au propriétaire
+    if (proprietaire) {
+      await notificationService.sendToUser(
+        proprietaire.id,
+        {
+          title: '❌ Retrait refusé',
+          body: raison 
+            ? `Votre demande de retrait a été refusée: ${raison}`
+            : 'Votre demande de retrait a été refusée',
+        },
+        {
+          type: 'retrait_refuse',
+          transactionId: transaction.id.toString(),
+          raison: raison || 'Non spécifiée',
+        }
+      );
+    }
+
     res.json({ 
       message: "Demande de retrait refusée",
       transaction 
@@ -151,7 +196,7 @@ exports.refuserRetrait = async (req, res) => {
   }
 };
 
-// 4️⃣ PROPRIÉTAIRE consulte l'historique de ses retraits
+// 4️⃣ PROPRIÉTAIRE consulte l'historique
 exports.historiqueRetraits = async (req, res) => {
   try {
     const retraits = await Transaction.findAll({
@@ -185,7 +230,7 @@ exports.historiqueRetraits = async (req, res) => {
   }
 };
 
-// ✅ AJOUTER: Lister les retraits en attente (admin)
+// Lister les retraits en attente (admin)
 exports.listerRetraitsEnAttente = async (req, res) => {
   try {
     const retraits = await Transaction.findAll({

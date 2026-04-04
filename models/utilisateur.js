@@ -36,7 +36,11 @@ module.exports = (sequelize, DataTypes) => {
       type: DataTypes.FLOAT, 
       defaultValue: 0,
       validate: { min: 0 }
-    }
+    },
+    fcmToken: { 
+  type: DataTypes.STRING, 
+  allowNull: true 
+}
   });
 
   Utilisateur.associate = (models) => {

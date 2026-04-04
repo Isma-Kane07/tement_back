@@ -5,6 +5,9 @@ const helmet = require('helmet');
 const morgan = require('morgan');
 require('dotenv').config();
 
+const notificationRoutes = require('./routes/notificationRoutes');
+
+
 const db = require('./models');
 const routes = require('./routes');
 
@@ -19,6 +22,9 @@ app.use(cors());
 app.use(morgan('dev'));
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
+
+app.use('/api/notifications', notificationRoutes);
+
 
 // Servir les fichiers statiques
 app.use('/uploads', express.static('uploads'));

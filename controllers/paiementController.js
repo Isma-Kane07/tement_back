@@ -1,8 +1,9 @@
 // controllers/paiementController.js
 const { Paiement, Reservation, Logement, Utilisateur, Transaction } = require('../models');
 const constants = require('../config/constants');
+const notificationService = require('../services/notificationService');
 
-// 1️⃣ Le locataire soumet la preuve de paiement (il a payé sur votre compte)
+// 1️⃣ Le locataire soumet la preuve de paiement
 exports.soumettrePaiement = async (req, res) => {
   const { reservation_id, methode, reference_transaction } = req.body;
 
@@ -19,7 +20,6 @@ exports.soumettrePaiement = async (req, res) => {
       return res.status(404).json({ message: "Réservation non trouvée" });
     }
 
-    // Vérifier que le locataire connecté est bien celui de la réservation
     if (reservation.locataire_id !== req.user.id) {
       return res.status(403).json({ message: "Non autorisé" });
     }
@@ -30,7 +30,6 @@ exports.soumettrePaiement = async (req, res) => {
       });
     }
 
-    // Vérifier si un paiement existe déjà
     const paiementExistant = await Paiement.findOne({
       where: { reservation_id }
     });
@@ -44,14 +43,13 @@ exports.soumettrePaiement = async (req, res) => {
 
     const logement = reservation.Logement;
     
-    // Calcul des montants
     const debut = new Date(reservation.date_debut);
     const fin = new Date(reservation.date_fin);
     const nbNuits = Math.ceil((fin - debut) / (1000 * 60 * 60 * 24));
     const montant_total = nbNuits * logement.prix_nuit;
 
-    const commission_tement = montant_total * constants.COMMISSION_RATE; // 15% pour vous
-    const net_proprietaire = montant_total * (1 - constants.COMMISSION_RATE); // 85% pour le proprio
+    const commission_tement = montant_total * constants.COMMISSION_RATE;
+    const net_proprietaire = montant_total * (1 - constants.COMMISSION_RATE);
 
     const paiement = await Paiement.create({
       reservation_id,
@@ -60,8 +58,26 @@ exports.soumettrePaiement = async (req, res) => {
       commission_tement,
       net_proprietaire,
       reference_transaction,
-      statut: constants.PAIEMENT_STATUT.EN_ATTENTE // En attente de votre validation
+      statut: constants.PAIEMENT_STATUT.EN_ATTENTE
     });
+
+    // 🔔 NOTIFICATION: Paiement soumis à l'admin
+    const locataire = await Utilisateur.findByPk(req.user.id);
+    
+    await notificationService.sendToUser(
+      1, // ID de l'admin (à ajuster selon ton admin)
+      {
+        title: '💰 Nouveau paiement en attente',
+        body: `${locataire.nom} a soumis un paiement de ${montant_total} FCFA`,
+      },
+      {
+        type: 'paiement_soumis',
+        paiementId: paiement.id.toString(),
+        reservationId: reservation.id.toString(),
+        montant: montant_total.toString(),
+        locataire: locataire.nom,
+      }
+    );
 
     res.status(201).json({ 
       message: "Preuve de paiement soumise, en attente de validation admin", 
@@ -79,7 +95,6 @@ exports.soumettrePaiement = async (req, res) => {
     res.status(500).json({ message: "Erreur serveur" });
   }
 };
-
 
 // 2️⃣ ADMIN valide le paiement
 exports.validerPaiement = async (req, res) => {
@@ -101,25 +116,20 @@ exports.validerPaiement = async (req, res) => {
       return res.status(400).json({ message: "Paiement déjà traité" });
     }
 
-    // Marquer le paiement comme effectué
     paiement.statut = constants.PAIEMENT_STATUT.EFFECTUE;
     paiement.date_paiement = new Date();
     await paiement.save();
 
     const reservation = paiement.Reservation;
     const logement = reservation.Logement;
-
-    // 👉 CRÉDITER LE PROPRIÉTAIRE (son wallet)
     const proprietaire = await Utilisateur.findByPk(logement.proprietaire_id);
     
     proprietaire.wallet_balance = (proprietaire.wallet_balance || 0) + paiement.net_proprietaire;
     await proprietaire.save();
 
-    // ✅ METTRE À JOUR LE STATUT DE LA RÉSERVATION
-    reservation.statut = constants.RESERVATION_STATUT.PAYE; // 'paye'
+    reservation.statut = constants.RESERVATION_STATUT.PAYE;
     await reservation.save();
 
-    // 👉 ENREGISTRER LA TRANSACTION POUR LE PROPRIÉTAIRE
     await Transaction.create({
       user_id: proprietaire.id,
       type: constants.TRANSACTION_TYPES.REVENU_LOCATION,
@@ -128,7 +138,6 @@ exports.validerPaiement = async (req, res) => {
       statut: 'valide'
     });
 
-    // 👉 ENREGISTRER VOTRE COMMISSION (admin)
     await Transaction.create({
       user_id: req.user.id,
       admin_id: req.user.id,
@@ -138,9 +147,37 @@ exports.validerPaiement = async (req, res) => {
       statut: 'valide'
     });
 
-    // Optionnel: Marquer le logement comme indisponible pour ces dates
     logement.disponible = false;
     await logement.save();
+
+    const locataire = await Utilisateur.findByPk(reservation.locataire_id);
+
+    // 🔔 NOTIFICATION 1: Au propriétaire (argent crédité)
+    await notificationService.sendToUser(
+      proprietaire.id,
+      {
+        title: '💰 Paiement reçu',
+        body: `${paiement.net_proprietaire} FCFA a été crédité sur votre wallet pour la réservation #${reservation.id}`,
+      },
+      {
+        type: 'paiement_recu',
+        reservationId: reservation.id.toString(),
+        montant: paiement.net_proprietaire.toString(),
+      }
+    );
+
+    // 🔔 NOTIFICATION 2: Au locataire (paiement validé)
+    await notificationService.sendToUser(
+      reservation.locataire_id,
+      {
+        title: '✓ Paiement validé',
+        body: `Votre paiement de ${paiement.montant_total} FCFA a été validé. Bon séjour chez ${logement.adresse} !`,
+      },
+      {
+        type: 'paiement_valide',
+        reservationId: reservation.id.toString(),
+      }
+    );
 
     res.json({ 
       message: "✅ Paiement validé avec succès",
@@ -161,7 +198,7 @@ exports.validerPaiement = async (req, res) => {
   }
 };
 
-// 3️⃣ VOIR TOUS LES PAIEMENTS EN ATTENTE (pour que vous puissiez valider)
+// 3️⃣ VOIR TOUS LES PAIEMENTS EN ATTENTE
 exports.listerPaiementsEnAttente = async (req, res) => {
   try {
     const paiements = await Paiement.findAll({
@@ -187,7 +224,6 @@ exports.listerPaiementsEnAttente = async (req, res) => {
       order: [['createdAt', 'ASC']]
     });
 
-    // Formatage pour l'affichage
     const result = paiements.map(p => ({
       id: p.id,
       reference: p.reference_transaction,
@@ -221,8 +257,6 @@ exports.listerPaiementsEnAttente = async (req, res) => {
   }
 };
 
-
-
 exports.historiqueCommissions = async (req, res) => {
   try {
     const commissions = await Transaction.findAll({
@@ -238,24 +272,16 @@ exports.historiqueCommissions = async (req, res) => {
       order: [['createdAt', 'DESC']]
     });
 
-    // Extraire les informations de la description
     const commissionsDetaillees = commissions.map(commission => {
       const commissionJSON = commission.toJSON();
       const description = commission.description || '';
       
-      // Debug: Afficher la description pour voir le format
-      console.log('Description:', description);
-      
-      // Extraire l'ID de réservation - Format: "Réservation #123"
       const reservationMatch = description.match(/Réservation #(\d+)/i);
       const reservationId = reservationMatch ? reservationMatch[1] : null;
       
-      // Extraire l'adresse du logement - Format: "Logement: 123 Rue Example"
-      // Capture tout après "Logement: " jusqu'au " - Propriétaire:"
       const logementMatch = description.match(/Logement:\s*([^-]+)/i);
       const logementAdresse = logementMatch ? logementMatch[1].trim() : null;
       
-      // Extraire le nom du propriétaire - Format: "Propriétaire: Jean Dupont"
       const proprioMatch = description.match(/Propriétaire:\s*([^.]+)/i);
       const proprietaireNom = proprioMatch ? proprioMatch[1].trim() : null;
       
