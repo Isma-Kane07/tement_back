@@ -1,52 +1,9 @@
-const multer = require('multer');
-const path = require('path');
-const fs = require('fs');
+// controllers/uploadController.js
+const cloudinaryService = require('../services/cloudinaryService');
 
-console.log('🔄 Controller upload chargé');
+console.log('🔄 Controller upload chargé (Cloudinary)');
 
-// Configuration de multer pour le stockage des fichiers
-const storage = multer.diskStorage({
-  destination: function (req, file, cb) {
-    const uploadDir = 'uploads/';
-    console.log('📁 Vérification dossier uploads');
-    // Créer le dossier s'il n'existe pas
-    if (!fs.existsSync(uploadDir)) {
-      console.log('📁 Création du dossier uploads');
-      fs.mkdirSync(uploadDir, { recursive: true });
-    }
-    cb(null, uploadDir);
-  },
-  filename: function (req, file, cb) {
-    const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9);
-    const ext = path.extname(file.originalname);
-    const filename = 'photo-' + uniqueSuffix + ext;
-    console.log('📸 Nom fichier généré:', filename);
-    cb(null, filename);
-  }
-});
-
-// Filtrer les types de fichiers acceptés
-const fileFilter = (req, file, cb) => {
-  const allowedTypes = /jpeg|jpg|png|gif/;
-  const extname = allowedTypes.test(path.extname(file.originalname).toLowerCase());
-  const mimetype = allowedTypes.test(file.mimetype);
-
-  console.log('🔍 Vérification fichier - mimetype:', file.mimetype, 'extname:', extname);
-
-  if (mimetype && extname) {
-    return cb(null, true);
-  } else {
-    cb(new Error('Seules les images sont autorisées'));
-  }
-};
-
-const upload = multer({
-  storage: storage,
-  limits: { fileSize: 5 * 1024 * 1024 },
-  fileFilter: fileFilter
-});
-
-// Controller d'upload
+// Upload d'une seule photo
 exports.uploadPhoto = async (req, res) => {
   console.log('📤 uploadPhoto appelé');
   console.log('req.file:', req.file);
@@ -57,15 +14,15 @@ exports.uploadPhoto = async (req, res) => {
       return res.status(400).json({ message: "Aucun fichier fourni" });
     }
 
-    const baseUrl = `${req.protocol}://${req.get('host')}`;
-    const photoUrl = `${baseUrl}/uploads/${req.file.filename}`;
+    const userId = req.user.id;
+    const result = await cloudinaryService.uploadProfilePhoto(req.file.buffer, userId);
     
-    console.log('✅ Photo uploadée avec succès:', photoUrl);
+    console.log('✅ Photo uploadée avec succès:', result);
 
     res.status(201).json({
       message: "Photo uploadée avec succès",
-      url: photoUrl,
-      filename: req.file.filename
+      url: result,
+      filename: result.split('/').pop()
     });
   } catch (err) {
     console.error("❌ Erreur upload:", err);
@@ -73,7 +30,7 @@ exports.uploadPhoto = async (req, res) => {
   }
 };
 
-// Upload multiple
+// Upload multiple de photos
 exports.uploadMultiplePhotos = async (req, res) => {
   console.log('📤 uploadMultiplePhotos appelé');
   console.log('req.files:', req.files?.length);
@@ -84,17 +41,16 @@ exports.uploadMultiplePhotos = async (req, res) => {
       return res.status(400).json({ message: "Aucun fichier fourni" });
     }
 
-    const baseUrl = `${req.protocol}://${req.get('host')}`;
-    const urls = req.files.map(file => ({
-      url: `${baseUrl}/uploads/${file.filename}`,
-      filename: file.filename
-    }));
+    const logementId = req.body.logement_id || Date.now();
+    const filesBuffers = req.files.map(file => file.buffer);
+    
+    const urls = await cloudinaryService.uploadLogementPhotos(filesBuffers, logementId);
 
     console.log(`✅ ${req.files.length} photo(s) uploadée(s)`);
 
     res.status(201).json({
       message: `${req.files.length} photo(s) uploadée(s) avec succès`,
-      urls: urls
+      urls: urls.map(url => ({ url: url, filename: url.split('/').pop() }))
     });
   } catch (err) {
     console.error("❌ Erreur upload multiple:", err);
